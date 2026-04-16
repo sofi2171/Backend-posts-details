@@ -21,27 +21,35 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const dbRT = admin.database();
 
-// 🚀 FAST UPDATE & SYNC ROUTE
+// 🚀 FAST UPDATE, SEARCH CLEANUP & SYNC ROUTE
 app.post('/api/update-post', async (req, res) => {
     try {
         const { postId, updatedData } = req.body;
 
-        // 1. Firestore Update
+        // 1. Firestore Update (Post ka status ya data badlein)
         await db.collection('posts').doc(postId).update({
             ...updatedData,
             lastSyncUpdate: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        // 2. GLOBAL SYNC SIGNAL (For Home Page)
-        // Ye poori app ko batayega ke data badal gaya hai
+        // 🔥 2. SEARCH INDEX CLEANUP (Realtime Database)
+        // Agar post inactive ya delete ho rahi hai, toh search entry foran urra do
+        if (updatedData.status === 'inactive' || updatedData.status === 'deleted') {
+            await dbRT.ref(`search_index/${postId}`).remove();
+            console.log(`Post ${postId} removed from Search Index.`);
+        }
+
+        // ⚡ 3. GLOBAL SYNC SIGNAL (Home Page refresh ke liye)
         await dbRT.ref('global_sync').set({
             lastUpdate: Date.now(),
-            target: 'trending_cache',
-            updatedPostId: postId
+            target: 'all_caches',
+            updatedPostId: postId,
+            action: updatedData.status || 'update'
         });
 
-        res.status(200).json({ success: true });
+        res.status(200).json({ success: true, message: "Updated and Search Index cleaned!" });
     } catch (error) {
+        console.error("Backend Error:", error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
