@@ -23,12 +23,11 @@ if (!admin.apps.length) {
     });
 }
 
-const db = admin.firestore();
+const db   = admin.firestore();
 const dbRT = admin.database();
 
 // ============================================
 // ☁️ CLOUDINARY MEDIA DELETE HELPER
-// Cloudinary REST API se file delete karta hai
 // ============================================
 async function deleteFromCloudinary(publicId, resourceType = 'image') {
     try {
@@ -41,24 +40,20 @@ async function deleteFromCloudinary(publicId, resourceType = 'image') {
             return false;
         }
 
-        const timestamp  = Math.floor(Date.now() / 1000);
-        const strToSign  = `public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
-        const signature  = crypto.createHash('sha1').update(strToSign).digest('hex');
+        const timestamp = Math.floor(Date.now() / 1000);
+        const strToSign = `public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
+        const signature = crypto.createHash('sha1').update(strToSign).digest('hex');
 
-        const formData   = new URLSearchParams();
-        formData.append('public_id',    publicId);
-        formData.append('timestamp',    timestamp);
-        formData.append('api_key',      apiKey);
-        formData.append('signature',    signature);
+        const formData  = new URLSearchParams();
+        formData.append('public_id', publicId);
+        formData.append('timestamp', timestamp);
+        formData.append('api_key',   apiKey);
+        formData.append('signature', signature);
 
-        const url = `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/destroy`;
+        const url      = `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/destroy`;
+        const response = await fetch(url, { method: 'POST', body: formData });
+        const result   = await response.json();
 
-        const response = await fetch(url, {
-            method: 'POST',
-            body: formData
-        });
-
-        const result = await response.json();
         console.log(`☁️ Cloudinary delete [${resourceType}] ${publicId}:`, result.result);
         return result.result === 'ok';
 
@@ -71,20 +66,10 @@ async function deleteFromCloudinary(publicId, resourceType = 'image') {
 // Cloudinary URL se public_id aur resource_type nikalta hai
 function parseCloudinaryUrl(url) {
     try {
-        // Example URL:
-        // https://res.cloudinary.com/Dr06qkbaa/image/upload/v123/post_uid_123.jpg
-        // https://res.cloudinary.com/Dr06qkbaa/video/upload/v123/post_uid_123.mp4
-        // https://res.cloudinary.com/Dr06qkbaa/raw/upload/v123/secure_doc.txt
-
-        const match = url.match(/\/(?:image|video|raw)\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+        const match     = url.match(/\/(?:image|video|raw)\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
         const typeMatch = url.match(/\/(image|video|raw)\/upload\//);
-
         if (!match || !typeMatch) return null;
-
-        const publicId     = match[1];
-        const resourceType = typeMatch[1]; // image | video | raw
-
-        return { publicId, resourceType };
+        return { publicId: match[1], resourceType: typeMatch[1] };
     } catch {
         return null;
     }
@@ -93,23 +78,18 @@ function parseCloudinaryUrl(url) {
 // Post ki saari media Cloudinary se delete karta hai
 async function deletePostMediaFromCloudinary(mediaArray) {
     if (!mediaArray || !Array.isArray(mediaArray) || mediaArray.length === 0) return;
-
     for (const mediaItem of mediaArray) {
         const url = mediaItem.url || mediaItem;
         if (!url || typeof url !== 'string') continue;
-
         const parsed = parseCloudinaryUrl(url);
-        if (!parsed) {
-            console.warn('⚠️ Could not parse Cloudinary URL:', url);
-            continue;
-        }
-
+        if (!parsed) { console.warn('⚠️ Could not parse Cloudinary URL:', url); continue; }
         await deleteFromCloudinary(parsed.publicId, parsed.resourceType);
     }
 }
 
 // ============================================
-// 🚀 POST UPDATE, SEARCH CLEANUP & SYNC ROUTE
+// 🚀 POST UPDATE ROUTE
+// POST /api/update-post
 // ============================================
 app.post('/api/update-post', async (req, res) => {
     try {
@@ -119,31 +99,23 @@ app.post('/api/update-post', async (req, res) => {
             return res.status(400).json({ success: false, error: 'postId required' });
         }
 
-        // Build update object
         const updateObj = {
             lastSyncUpdate: admin.firestore.FieldValue.serverTimestamp()
         };
 
-        // Frontend se expiresAt aaya ho toh save karo
-        if (expiresAt) {
-            updateObj.expiresAt = expiresAt;
-        }
+        if (expiresAt) updateObj.expiresAt = expiresAt;
 
-        // updatedData object aaya ho toh merge karo
         if (updatedData && typeof updatedData === 'object') {
             Object.assign(updateObj, updatedData);
         }
 
-        // 1. Firestore Update
         await db.collection('posts').doc(postId).update(updateObj);
 
-        // 2. Agar status inactive ya deleted ho — search index hatao
         if (updatedData && (updatedData.status === 'inactive' || updatedData.status === 'deleted')) {
             await dbRT.ref(`search_index/${postId}`).remove();
             console.log(`🗑️ Post ${postId} removed from Search Index.`);
         }
 
-        // 3. Global Sync Signal
         await dbRT.ref('global_sync').set({
             lastUpdate:    Date.now(),
             target:        'all_caches',
@@ -151,16 +123,16 @@ app.post('/api/update-post', async (req, res) => {
             action:        (updatedData && updatedData.status) || 'update'
         });
 
-        res.status(200).json({ success: true, message: 'Updated and Search Index cleaned!' });
+        res.status(200).json({ success: true, message: 'Updated successfully!' });
 
     } catch (error) {
-        console.error('Backend Error:', error);
+        console.error('Update Error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// 🗑️ POST DELETE + CLOUDINARY MEDIA CLEANUP
+// 🗑️ POST DELETE + CLOUDINARY CLEANUP
 // DELETE /api/delete-post
 // Body: { postId: "abc123" }
 // ============================================
@@ -172,7 +144,6 @@ app.delete('/api/delete-post', async (req, res) => {
             return res.status(400).json({ success: false, error: 'postId required' });
         }
 
-        // 1. Firestore se post fetch karo — media URLs lene ke liye
         const postDoc = await db.collection('posts').doc(postId).get();
 
         if (!postDoc.exists) {
@@ -181,21 +152,20 @@ app.delete('/api/delete-post', async (req, res) => {
 
         const postData = postDoc.data();
 
-        // 2. ☁️ Cloudinary se saari media delete karo
+        // ☁️ Cloudinary se media delete
         if (postData.media && postData.media.length > 0) {
             console.log(`☁️ Deleting ${postData.media.length} media file(s) from Cloudinary...`);
             await deletePostMediaFromCloudinary(postData.media);
         }
 
-        // 3. Firestore se post delete karo
+        // Firestore se delete
         await db.collection('posts').doc(postId).delete();
         console.log(`✅ Post ${postId} deleted from Firestore.`);
 
-        // 4. RTDB Search Index se hatao
+        // RTDB Search Index se hatao
         await dbRT.ref(`search_index/${postId}`).remove();
-        console.log(`✅ Post ${postId} removed from Search Index.`);
 
-        // 5. Global Sync Signal
+        // Global Sync
         await dbRT.ref('global_sync').set({
             lastUpdate:    Date.now(),
             target:        'all_caches',
@@ -212,57 +182,133 @@ app.delete('/api/delete-post', async (req, res) => {
 });
 
 // ============================================
-// 🕐 AUTO EXPIRY DELETE (Cron — har ghante chale)
+// 🔍 DEBUG — Expired Posts Check (Delete nahi karta)
+// GET /api/debug-expired
+// ============================================
+app.get('/api/debug-expired', async (req, res) => {
+    try {
+        const now = new Date();
+
+        const snapshot = await db.collection('posts').get();
+
+        const results = [];
+        snapshot.docs.forEach(docSnap => {
+            const post = docSnap.data();
+            if (post.expiresAt) {
+
+                // Date parse — Timestamp ya string dono
+                let expiryDate;
+                if (typeof post.expiresAt.toDate === 'function') {
+                    expiryDate = post.expiresAt.toDate();
+                } else {
+                    expiryDate = new Date(post.expiresAt);
+                }
+
+                results.push({
+                    id:                    docSnap.id,
+                    title:                 post.title || 'No title',
+                    expiresAt:             post.expiresAt,
+                    expiresAt_type:        typeof post.expiresAt,
+                    isExpired:             post.isExpired,
+                    isExpiredField_exists: post.isExpired !== undefined,
+                    alreadyPast:           expiryDate <= now,
+                    expiryDate_parsed:     expiryDate.toISOString()
+                });
+            }
+        });
+
+        res.json({
+            now:               now.toISOString(),
+            total_with_expiry: results.length,
+            posts:             results
+        });
+
+    } catch (err) {
+        console.error('Debug Error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
+// 🕐 AUTO EXPIRY DELETE (Cron — har ghante)
 // GET /api/cleanup-expired
 // ============================================
 app.get('/api/cleanup-expired', async (req, res) => {
     try {
-        const now    = new Date();
-        const nowISO = now.toISOString();
+        const now = new Date();
 
-        const snapshot = await db.collection('posts')
-            .where('expiresAt', '<=', nowISO)
-            .where('isExpired', '==', false)
-            .get();
+        // Saari posts fetch karo
+        // String aur Timestamp dono formats handle karne ke liye
+        const snapshot = await db.collection('posts').get();
 
         if (snapshot.empty) {
-            return res.json({ success: true, message: 'No expired posts found.', deleted: 0 });
+            return res.json({ success: true, message: 'No posts found.', deleted: 0 });
         }
 
         let deleted = 0;
+        let skipped = 0;
 
         for (const docSnap of snapshot.docs) {
             const post   = docSnap.data();
-            const expiry = new Date(post.expiresAt);
+            const postId = docSnap.id;
 
-            if (now >= expiry) {
+            // expiresAt nahi — skip
+            if (!post.expiresAt) { skipped++; continue; }
 
-                // ☁️ Cloudinary se media delete karo pehle
+            // Already expired mark — skip
+            if (post.isExpired === true) { skipped++; continue; }
+
+            // Date parse — Firestore Timestamp ya ISO string dono
+            let expiryDate;
+            if (typeof post.expiresAt.toDate === 'function') {
+                expiryDate = post.expiresAt.toDate();
+            } else {
+                expiryDate = new Date(post.expiresAt);
+            }
+
+            // Invalid date — skip
+            if (isNaN(expiryDate.getTime())) { skipped++; continue; }
+
+            // Abhi tak expire nahi hua — skip
+            if (now < expiryDate) { skipped++; continue; }
+
+            // ✅ Expire ho gaya — delete karo
+            try {
+                // ☁️ Cloudinary se media delete
                 if (post.media && post.media.length > 0) {
-                    console.log(`☁️ Deleting media for expired post ${docSnap.id}...`);
+                    console.log(`☁️ Deleting media for expired post ${postId}...`);
                     await deletePostMediaFromCloudinary(post.media);
                 }
 
                 // Firestore se delete
-                await db.collection('posts').doc(docSnap.id).delete();
+                await db.collection('posts').doc(postId).delete();
 
                 // RTDB Search Index se hatao
-                await dbRT.ref('search_index/' + docSnap.id).remove();
+                await dbRT.ref('search_index/' + postId).remove();
 
                 // Global Sync Signal
                 await dbRT.ref('global_sync').set({
                     lastUpdate:    Date.now(),
                     target:        'all_caches',
-                    updatedPostId: docSnap.id,
+                    updatedPostId: postId,
                     action:        'expired_deleted'
                 });
 
-                console.log(`✅ Expired post deleted: ${docSnap.id}`);
+                console.log(`✅ Expired post deleted: ${postId}`);
                 deleted++;
+
+            } catch (deleteErr) {
+                console.error(`❌ Failed to delete post ${postId}:`, deleteErr.message);
             }
         }
 
-        return res.json({ success: true, deleted, message: `${deleted} expired post(s) deleted.` });
+        console.log(`Cleanup done — deleted: ${deleted}, skipped: ${skipped}`);
+        return res.json({
+            success: true,
+            deleted,
+            skipped,
+            message: `${deleted} expired post(s) deleted.`
+        });
 
     } catch (err) {
         console.error('Cleanup Error:', err);
@@ -277,11 +323,12 @@ app.get('/', (req, res) => {
     res.json({
         status:    'ok',
         service:   'Health Jobs — Posts Backend',
-        version:   '2.0.0',
+        version:   '3.0.0',
         endpoints: [
             'POST   /api/update-post',
             'DELETE /api/delete-post',
-            'GET    /api/cleanup-expired'
+            'GET    /api/cleanup-expired',
+            'GET    /api/debug-expired'
         ]
     });
 });
